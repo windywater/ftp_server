@@ -70,24 +70,24 @@ struct FtpClient
     sockaddr_in addr;
     std::string user;
     bool login;
-    std::string rootPath;
-    std::string curRelativePath;
+    std::string rootPath;   // 逻辑根目录的实际路径
+    std::string curRelativePath;    // 逻辑路径
     
     bufferevent* cmdBev;
     bufferevent* pasvsBev;
     evconnlistener* pasvListener;
-    ClientCommand lastCmd;
+    ClientCommand lastCmd;  // 上一个命令
     DataType type;
 
     bool hasPendingCmd;
-    ClientCommand pendingCmd;
-    std::string pendingAccessFile;
-    LocalFile* storFile;
+    ClientCommand pendingCmd;   // 上一个待处理的命令，一般是需要数据通道配合使用的命令，如LIST、RETR等
+    std::string pendingAccessFile;  // 待处理命令关联的文件
+    LocalFile* storFile;    // 收到STOR文件上传命令后，在服务器端存储的文件
     
-    event* cmdTimer;
+    event* cmdTimer;    // 命令通道超时
     short cmdTickCount;
     
-    FtpServer* serverPtr;
+    FtpServer* serverPtr;   // 方便在类静态函数中操作FtpServer类
 };
 
 typedef void (FtpServer::*ProcessFunc)(FtpClient*, ClientCommand);

@@ -6,6 +6,7 @@
 #include <ifaddrs.h>
 #include "LocalFile.h"
 
+// 若未登录，大部分命令请求要回显登录提示
 #define ENSURE_USER_LOGIN(client) \
     do \
     { \
@@ -31,9 +32,10 @@ FtpServer::FtpServer()
 {
     m_cmdPort = 5021;
     m_cmdTimeout = 60;
+	m_logger = new Logger;
+
     initUserConfigs();
     initCmdMaps();
-    m_logger = new Logger;
 }
 
 FtpServer::~FtpServer()
@@ -108,7 +110,6 @@ void FtpServer::initUserConfigs()
     cfg->password = "test";
     cfg->rootPath = "/home";
     m_userConfigMap.insert(std::make_pair("test", cfg));
-    
 }
 
 void FtpServer::clearUserConfigs()
@@ -158,6 +159,7 @@ int FtpServer::start()
     client->cmdBev = bev;
     client->addr = *((sockaddr_in*)address);
     
+    // 命令通道超时检测
     client->cmdTimer = event_new(base, -1, EV_PERSIST, FtpServer::cmdTimerCallback, client);
     struct timeval tv;
     evutil_timerclear(&tv);
@@ -182,6 +184,7 @@ int FtpServer::start()
     count = bufferevent_read(bev, buf, BUF_SIZE);
     if (count > 0)
     {
+        // 计时归零
         client->cmdTickCount = 0;
         std::string request(buf, count);
 
@@ -232,6 +235,7 @@ ClientCommand FtpServer::parseClientCommand(std::string cmdStr)
     FtpClient* client = (FtpClient*)arg;
     FtpServer* serverPtr = client->serverPtr;
     
+    // 命令通道客户端关闭连接
     if (event & BEV_EVENT_EOF)
     {
         serverPtr->removeClient(client);
@@ -353,9 +357,9 @@ void FtpServer::processCwd(FtpClient* client, ClientCommand cmd)
     ENSURE_USER_LOGIN(client)
 
     std::string newRelPath;
-    if (cmd.data.size() > 0 && cmd.data[0] == '/')
+    if (cmd.data.size() > 0 && cmd.data[0] == '/')  // 切换到绝对路径
         newRelPath = cmd.data;
-    else
+    else    // 相对路径
     {
         if (client->curRelativePath == "/")
             newRelPath = client->curRelativePath + cmd.data;
@@ -418,6 +422,7 @@ void FtpServer::processPasv(FtpClient* client, ClientCommand cmd)
     evconnlistener* pasvListener = createListenerForPasv(FtpServer::pasvListenCallback, client);
     client->pasvListener = pasvListener;
 
+    // 回显服务端IP地址和可用端口
     std::string address = formatPasvAddress(pasvListener);
     std::string response = "227 Entering Passive Mode ("+address+").";
     echo(client->cmdBev, response);
@@ -476,6 +481,7 @@ evconnlistener* FtpServer::createListenerForPasv(evconnlistener_cb callback, Ftp
     memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
     
+    // 寻找可用端口
     for (uint16_t port = 40000; port < 45000; port++)
     {
         addr.sin_port = htons(port);
@@ -498,10 +504,12 @@ void FtpServer::processList(FtpClient* client, ClientCommand cmd)
     std::string target = generateAbsoluteTarget(client, cmd.data);
     if (client->pasvsBev != NULL)
     {
+        // 客户端先连上了PASV数据通道，直接回写目录
         echoList(client, target);
     }
     else
     {
+        // 客户端还没有连上PASV数据通道，先记录，一旦连上即回显
         client->hasPendingCmd = true;
         client->pendingCmd = cmd;
         client->pendingAccessFile = target;
@@ -511,7 +519,7 @@ void FtpServer::processList(FtpClient* client, ClientCommand cmd)
 void FtpServer::echoList(FtpClient* client, const std::string& dir)
 {
     std::string dirRes = LocalFile::getDirList(dir);
-    echo(client->pasvsBev, dirRes, true);
+    echo(client->pasvsBev, dirRes, true);   // 立即发送，不通过libevent的缓存队列
     echo(client->cmdBev, "226 Transfer complete.");
     
     bufferevent_free(client->pasvsBev);
@@ -568,13 +576,14 @@ void FtpServer::processStor(FtpClient* client, ClientCommand cmd)
     ENSURE_PARAMETERS(cmd)
     
     client->storFile = new LocalFile;
-    bool ret = client->storFile->open(client->pendingAccessFile, LocalFile::Write|LocalFile::Truncate);
+    std::string target = generateAbsoluteTarget(client, cmd.data);
+    bool ret = client->storFile->open(target, LocalFile::Write|LocalFile::Truncate);
     
     if (ret)
     {
         client->hasPendingCmd = true;
         client->pendingCmd = cmd;
-        client->pendingAccessFile = generateAbsoluteTarget(client, cmd.data);
+        client->pendingAccessFile = target;
         
         echo(client->cmdBev, "125 Data connection already open; Transfer starting.");
     }
@@ -592,13 +601,14 @@ void FtpServer::processAppe(FtpClient* client, ClientCommand cmd)
     ENSURE_PARAMETERS(cmd)
             
     client->storFile = new LocalFile;
-    bool ret = client->storFile->open(client->pendingAccessFile, LocalFile::Write);
+    std::string target = generateAbsoluteTarget(client, cmd.data);
+    bool ret = client->storFile->open(target, LocalFile::Write);
     
     if (ret)
     {
         client->hasPendingCmd = true;
         client->pendingCmd = cmd;
-        client->pendingAccessFile = generateAbsoluteTarget(client, cmd.data);
+        client->pendingAccessFile = target;
         
         echo(client->cmdBev, "125 Data connection already open; Transfer starting.");
     }
@@ -734,6 +744,7 @@ void FtpServer::processQuit(FtpClient* client, ClientCommand cmd)
     bufferevent_enable(pasvBev, EV_READ|EV_WRITE|EV_PERSIST);
     client->pasvsBev = pasvBev;
     
+    // 处理之前待处理的命令
     if (client->hasPendingCmd)
     {
         if (client->pendingCmd.op == LIST)
@@ -760,7 +771,9 @@ void FtpServer::processQuit(FtpClient* client, ClientCommand cmd)
 
     length = bufferevent_read(bev, buf, BUF_SIZE);
     
-    if (client->hasPendingCmd && client->pendingCmd.op == STOR)
+    // 处理客户端上传的文件
+    if (client->hasPendingCmd &&
+        (client->pendingCmd.op == STOR || client->pendingCmd.op == APPE))
     {
         client->storFile->write(buf, length);
     }
@@ -773,6 +786,7 @@ void FtpServer::processQuit(FtpClient* client, ClientCommand cmd)
     
     if (event & BEV_EVENT_EOF)
     {
+        // 客户端在数据通道主动关闭，表示文件上传完成
         if (client->hasPendingCmd && 
             (client->pendingCmd.op == STOR || client->pendingCmd.op == APPE))
         {
@@ -796,6 +810,7 @@ void FtpServer::processQuit(FtpClient* client, ClientCommand cmd)
     FtpClient* client = (FtpClient*)arg;
     FtpServer* serverPtr = client->serverPtr;
     
+    // 超时则主动关闭命令客户端
     client->cmdTickCount++;
     if (client->cmdTickCount >= serverPtr->m_cmdTimeout)
         serverPtr->removeClient(client);
